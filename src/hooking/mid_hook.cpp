@@ -167,7 +167,10 @@ namespace ellohim
 		m_stub = core::allocate_page_near(m_target, m_stub_size);
 		if (!m_stub)
 		{
-			throw std::runtime_error(std::format("Failed to allocate near-memory for mid_hook '{}'", m_name));
+			m_stub = VirtualAlloc(nullptr, m_stub_size, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+			if (!m_stub)
+				throw std::runtime_error(std::format("Failed to allocate memory for mid_hook '{}'", m_name));
+			logger::warning("mid_hook '{}': near allocation failed; using absolute 14-byte entry patch", m_name);
 		}
 
 		std::vector<uint8_t> code;
@@ -302,13 +305,17 @@ namespace ellohim
 		emit8(0x48); emit8(0x83); emit8(0xC4); emit8(0x08);
 
 		// 17. Disassemble stolen instructions from target using Zydis
+		intptr_t rel_offset = reinterpret_cast<intptr_t>(m_stub) - (reinterpret_cast<intptr_t>(m_target) + 5);
+		const bool can_rel32 = (rel_offset >= INT32_MIN && rel_offset <= INT32_MAX);
+		const uint32_t required_bytes = can_rel32 ? 5 : 14;
+
 		ZydisDecoder decoder;
 		ZydisDecoderInit(&decoder, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64);
 
 		auto* src = static_cast<uint8_t*>(m_target);
 		uint32_t stolen_bytes = 0;
 
-		while (stolen_bytes < 5)
+		while (stolen_bytes < required_bytes)
 		{
 			ZydisDecodedInstruction insn{};
 			ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT]{};
@@ -402,10 +409,32 @@ namespace ellohim
 		std::memcpy(m_stub, code.data(), code.size());
 		FlushInstructionCache(GetCurrentProcess(), m_stub, code.size());
 
+#if defined(_M_X64) || defined(__x86_64__)
+		if (can_rel32)
+		{
+			m_patch_bytes[0] = 0xE9;
+			int32_t disp32 = static_cast<int32_t>(rel_offset);
+			std::memcpy(&m_patch_bytes[1], &disp32, sizeof(int32_t));
+			m_patch_size = 5;
+		}
+		else
+		{
+			m_patch_bytes[0] = 0xFF;
+			m_patch_bytes[1] = 0x25;
+			m_patch_bytes[2] = 0x00;
+			m_patch_bytes[3] = 0x00;
+			m_patch_bytes[4] = 0x00;
+			m_patch_bytes[5] = 0x00;
+			auto stub_addr = reinterpret_cast<uint64_t>(m_stub);
+			std::memcpy(&m_patch_bytes[6], &stub_addr, sizeof(uint64_t));
+			m_patch_size = 14;
+		}
+#else
 		m_patch_bytes[0] = 0xE9;
 		intptr_t rel_offset = reinterpret_cast<intptr_t>(m_stub) - (reinterpret_cast<intptr_t>(m_target) + 5);
 		std::memcpy(&m_patch_bytes[1], &rel_offset, sizeof(int32_t));
 		m_patch_size = 5;
+#endif
 	}
 
 	bool mid_hook::enable()
