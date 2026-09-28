@@ -86,6 +86,32 @@ namespace mid_detours
 	}
 }
 
+// Detour for VFT Hook (PolyHook V2 style VFuncSwap)
+namespace vft_detours
+{
+	static inline bool g_vft_called = false;
+	int __fastcall hook_get_fps(IGameRenderer* this_ptr)
+	{
+		g_vft_called = true;
+		std::cout << "[VFT Hook] get_fps intercepted! Original would return: "
+		          << vft_hook::get_original<&hook_get_fps>()(this_ptr)
+		          << ", spoofing to 144 FPS.\n";
+		return 144;
+	}
+}
+
+// Detour for IAT Hook
+namespace iat_detours
+{
+	static inline bool g_iat_called = false;
+	BOOL WINAPI hook_is_debugger_present()
+	{
+		g_iat_called = true;
+		std::cout << "[IAT Hook] IsDebuggerPresent intercepted! Returning spoofed TRUE.\n";
+		return TRUE;
+	}
+}
+
 int main()
 {
 	std::cout << "==========================================\n";
@@ -208,6 +234,74 @@ int main()
 		if (!mid_detours::g_mid_called && score2 == 22)
 		{
 			std::cout << ">>> Mid-Function unhook SUCCESS! Clean restoration.\n\n";
+		}
+		// ---------------------------------------------------------
+		// DEMO 4: VFT HOOK (PolyHook V2 VFuncSwap style)
+		// ---------------------------------------------------------
+		std::cout << "[Step 5] Setting up VFT Hook (PolyHook V2 VFuncSwap style)...\n";
+		std::cout << "Calling unhooked get_fps(): " << renderer->get_fps() << " FPS\n";
+
+		// Hook virtual table slot 2 directly in-place
+		vft_hook::add<&vft_detours::hook_get_fps>("GetFpsVFT", renderer.get(), 2);
+		vft_hook::enable_all();
+
+		std::cout << "Calling get_fps() while VFT hook is ENABLED:\n";
+		int fps = renderer->get_fps();
+		std::cout << "  Returned FPS: " << fps << "\n";
+
+		if (vft_detours::g_vft_called && fps == 144)
+		{
+			std::cout << ">>> VFT Hook SUCCESS! Table slot replaced in-place.\n\n";
+		}
+		else
+		{
+			std::cerr << ">>> VFT Hook FAILED!\n\n";
+		}
+
+		vft_hook::disable_all();
+		vft_detours::g_vft_called = false;
+		int orig_fps = renderer->get_fps();
+		std::cout << "Calling get_fps() after VFT hook is DISABLED: " << orig_fps << " FPS\n";
+		if (!vft_detours::g_vft_called && orig_fps == 60)
+		{
+			std::cout << ">>> VFT unhook SUCCESS! Table slot restored.\n\n";
+		}
+
+		// ---------------------------------------------------------
+		// DEMO 5: IAT HOOK (Import Address Table Hooking)
+		// ---------------------------------------------------------
+		std::cout << "[Step 6] Setting up IAT Hook on IsDebuggerPresent...\n";
+		BOOL initial_dbg = IsDebuggerPresent();
+		std::cout << "Initial IsDebuggerPresent(): " << initial_dbg << "\n";
+
+		iat_hook::add<&iat_detours::hook_is_debugger_present>(
+			"IsDebuggerPresentIAT",
+			GetModuleHandleW(nullptr),
+			"KERNEL32.dll",
+			"IsDebuggerPresent"
+		);
+		iat_hook::enable_all();
+
+		BOOL hooked_dbg = IsDebuggerPresent();
+		std::cout << "IsDebuggerPresent() while IAT hook is ENABLED: " << hooked_dbg << "\n";
+
+		if (iat_detours::g_iat_called && hooked_dbg == TRUE)
+		{
+			std::cout << ">>> IAT Hook SUCCESS! Import address table pointer redirected.\n\n";
+		}
+		else
+		{
+			std::cerr << ">>> IAT Hook FAILED!\n\n";
+		}
+
+		iat_hook::disable_all();
+		iat_detours::g_iat_called = false;
+		BOOL restored_dbg = IsDebuggerPresent();
+		std::cout << "IsDebuggerPresent() after IAT hook is DISABLED: " << restored_dbg << "\n";
+
+		if (!iat_detours::g_iat_called && restored_dbg == initial_dbg)
+		{
+			std::cout << ">>> IAT unhook SUCCESS! Restored original import pointer.\n\n";
 		}
 
 		std::cout << "==========================================\n";

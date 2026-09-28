@@ -7,6 +7,8 @@
 #include "hooking/detour_base.hpp"
 #include "hooking/detour_hook.hpp"
 #include "hooking/vmt_hook.hpp"
+#include "hooking/vft_hook.hpp"
+#include "hooking/iat_hook.hpp"
 #include "hooking/swap_pointer_hook.hpp"
 #include "hooking/mid_hook.hpp"
 

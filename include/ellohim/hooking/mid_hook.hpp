@@ -66,8 +66,8 @@ namespace ellohim
 		mid_hook(const mid_hook&) = delete;
 		mid_hook& operator=(const mid_hook&) = delete;
 
-		mid_hook(mid_hook&& other) = delete;
-		mid_hook& operator=(mid_hook&& other) = delete;
+		mid_hook(mid_hook&& other) noexcept;
+		mid_hook& operator=(mid_hook&& other) noexcept;
 
 		bool enable();
 		bool disable();

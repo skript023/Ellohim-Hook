@@ -1,153 +1,131 @@
 #include "trampoline.hpp"
-#include "hde/hde64.h"
+#include <Zydis/Zydis.h>
 #include <cstring>
-#include <limits>
-#include <algorithm>
 
 namespace ellohim::core
 {
-	static bool fits32(int64_t value)
+#pragma pack(push, 1)
+	struct jmp_abs_x64
 	{
-		return value >= INT32_MIN && value <= INT32_MAX;
-	}
-	static void absolute_jump(uint8_t* out, uintptr_t address)
-	{
-		const uint8_t head[] = {0xff, 0x25, 0, 0, 0, 0};
-		std::memcpy(out, head, 6);
-		std::memcpy(out + 6, &address, 8);
-	}
-	static bool build(void* target, void* detour, void* slot, hook_info& info)
+		uint8_t opcode0{0xFF};
+		uint8_t opcode1{0x25};
+		uint32_t dummy{0x00000000};
+		uint64_t address{0};
+	};
+#pragma pack(pop)
+
+	bool create_trampoline(void* target, void* detour, void* slot, hook_info& out_info)
 	{
 		if (!target || !detour || !slot)
 			return false;
-		info = {};
-		info.target = target;
-		info.detour = detour;
-		info.slot = slot;
-		info.trampoline = slot;
-		auto src = static_cast<uint8_t*>(target);
-		auto dst = static_cast<uint8_t*>(slot);
-		auto relay = dst + 480;
-		const auto distance = reinterpret_cast<intptr_t>(relay) - (reinterpret_cast<intptr_t>(src) + 5);
-		const uint32_t required = fits32(distance) ? 5 : 14;
-		hde64s decoded[32]{};
-		uint8_t kinds[32]{};
-		uint16_t lengths[32]{};
-		uintptr_t destinations[32]{};
-		uint32_t stolen = 0, emitted = 0;
-		bool terminal = false;
-		while (stolen < required)
+
+		out_info.target = target;
+		out_info.detour = detour;
+		out_info.slot = slot;
+
+		auto* src = static_cast<uint8_t*>(target);
+		auto* tramp = static_cast<uint8_t*>(slot);
+
+#if defined(_M_X64) || defined(__x86_64__)
+		auto* relay = tramp + 48;
+		out_info.relay = relay;
+
+		auto* relay_jmp = reinterpret_cast<jmp_abs_x64*>(relay);
+		relay_jmp->opcode0 = 0xFF;
+		relay_jmp->opcode1 = 0x25;
+		relay_jmp->dummy = 0x00000000;
+		relay_jmp->address = reinterpret_cast<uint64_t>(detour);
+
+		out_info.patch_bytes[0] = 0xE9;
+		intptr_t rel_offset = reinterpret_cast<intptr_t>(relay) - (reinterpret_cast<intptr_t>(target) + 5);
+		std::memcpy(&out_info.patch_bytes[1], &rel_offset, sizeof(int32_t));
+		out_info.patch_size = 5;
+#else
+		out_info.relay = detour;
+		out_info.patch_bytes[0] = 0xE9;
+		intptr_t rel_offset = reinterpret_cast<intptr_t>(detour) - (reinterpret_cast<intptr_t>(target) + 5);
+		std::memcpy(&out_info.patch_bytes[1], &rel_offset, sizeof(int32_t));
+		out_info.patch_size = 5;
+#endif
+
+		ZydisDecoder decoder;
+#if defined(_M_X64) || defined(__x86_64__)
+		ZydisDecoderInit(&decoder, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64);
+#else
+		ZydisDecoderInit(&decoder, ZYDIS_MACHINE_MODE_LEGACY_32, ZYDIS_STACK_WIDTH_32);
+#endif
+
+		uint32_t stolen_bytes = 0;
+		uint32_t tramp_bytes = 0;
+
+		while (stolen_bytes < 5)
 		{
-			if (info.count == 32)
-				return false;
-			if (terminal && src[stolen] != 0x90 && src[stolen] != 0xcc && src[stolen] != 0)
-				return false;
-			auto& instruction = decoded[info.count];
-			const auto size = hde64_disasm(src + stolen, &instruction);
-			if (!size || instruction.flags & F_ERROR || stolen + size > sizeof(info.original_bytes))
-				return false;
-			uint8_t kind = 0;
-			uint16_t output = static_cast<uint16_t>(size);
-			uintptr_t destination = 0;
-			if (instruction.opcode >= 0xe0 && instruction.opcode <= 0xe3)
-				return false;
-			if (instruction.opcode == 0xe8 || instruction.opcode == 0xe9 || instruction.opcode == 0xeb || (instruction.opcode >= 0x70 && instruction.opcode <= 0x7f) || (instruction.opcode == 0x0f && instruction.opcode2 >= 0x80 && instruction.opcode2 <= 0x8f))
+			ZydisDecodedInstruction insn{};
+			ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT]{};
+
+			if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, src + stolen_bytes, 15, &insn, operands)))
 			{
-				const auto relative = instruction.flags & F_IMM8 ? int64_t(static_cast<int8_t>(instruction.imm.imm8)) : int64_t(static_cast<int32_t>(instruction.imm.imm32));
-				destination = reinterpret_cast<uintptr_t>(src + stolen + size) + relative;
-				kind = instruction.opcode == 0xe8 ? 1 : (instruction.opcode == 0xe9 || instruction.opcode == 0xeb) ? 2 :
-				                                                                                                     3;
-				output = kind == 2 ? 14 : 16;
+				return false;
 			}
-			if (instruction.opcode == 0xc3 || instruction.opcode == 0xc2 || (kind == 2 && (destination < reinterpret_cast<uintptr_t>(src) || destination >= reinterpret_cast<uintptr_t>(src + required))))
-				terminal = true;
-			info.old_offsets[info.count] = static_cast<uint8_t>(stolen);
-			info.new_offsets[info.count] = static_cast<uint16_t>(emitted);
-			kinds[info.count] = kind;
-			lengths[info.count] = output;
-			destinations[info.count] = destination;
-			++info.count;
-			stolen += size;
-			emitted += output;
-			if (emitted + 14 >= 480)
-				return false;
-		}
-		for (uint32_t i = 0; i < info.count; ++i)
-		{
-			auto& instruction = decoded[i];
-			auto from = src + info.old_offsets[i];
-			auto to = dst + info.new_offsets[i];
-			auto destination = destinations[i];
-			if (kinds[i] && destination >= reinterpret_cast<uintptr_t>(src) && destination < reinterpret_cast<uintptr_t>(src + stolen))
+
+			// Copy raw instruction to trampoline
+			std::memcpy(tramp + tramp_bytes, src + stolen_bytes, insn.length);
+
+#if defined(_M_X64) || defined(__x86_64__)
+			// Check for RIP-relative memory operand or relative branch
+			for (uint8_t i = 0; i < insn.operand_count_visible; ++i)
 			{
-				bool found = false;
-				for (uint32_t j = 0; j < info.count; ++j)
-					if (destination == reinterpret_cast<uintptr_t>(src + info.old_offsets[j]))
-					{
-						destination = reinterpret_cast<uintptr_t>(dst + info.new_offsets[j]);
-						found = true;
-						break;
-					}
-				if (!found)
-					return false;
-			}
-			if (kinds[i] == 1)
-			{
-				const uint8_t call[] = {0xff, 0x15, 2, 0, 0, 0, 0xeb, 8};
-				std::memcpy(to, call, 8);
-				std::memcpy(to + 8, &destination, 8);
-			}
-			else if (kinds[i] == 2)
-				absolute_jump(to, destination);
-			else if (kinds[i] == 3)
-			{
-				const auto condition = instruction.opcode == 0x0f ? instruction.opcode2 : instruction.opcode;
-				to[0] = 0x70 | ((condition & 0xf) ^ 1);
-				to[1] = 14;
-				absolute_jump(to + 2, destination);
-			}
-			else
-			{
-				std::memcpy(to, from, instruction.len);
-				if (!instruction.p_67 && (instruction.flags & F_MODRM) && instruction.modrm_mod == 0 && instruction.modrm_rm == 5)
+				if (operands[i].type == ZYDIS_OPERAND_TYPE_MEMORY && operands[i].mem.base == ZYDIS_REGISTER_RIP)
 				{
-					const auto address = reinterpret_cast<intptr_t>(from + instruction.len) + static_cast<int32_t>(instruction.disp.disp32);
-					const auto displacement = address - reinterpret_cast<intptr_t>(to + instruction.len);
-					if (!fits32(displacement))
-						return false;
-					const auto offset = instruction.len - ((instruction.flags & F_IMM8) ? 1 : 0) - ((instruction.flags & F_IMM16) ? 2 : 0) - ((instruction.flags & F_IMM32) ? 4 : 0) - ((instruction.flags & F_IMM64) ? 8 : 0) - 4;
-					const auto value = static_cast<int32_t>(displacement);
-					std::memcpy(to + offset, &value, 4);
+					ZyanU64 target_abs = 0;
+					ZydisCalcAbsoluteAddress(&insn, &operands[i], reinterpret_cast<ZyanU64>(src + stolen_bytes), &target_abs);
+
+					ZyanI64 new_disp = static_cast<ZyanI64>(target_abs) - static_cast<ZyanI64>(reinterpret_cast<uintptr_t>(tramp + tramp_bytes) + insn.length);
+					std::memcpy(tramp + tramp_bytes + insn.raw.disp.offset, &new_disp, sizeof(int32_t));
+				}
+				else if (operands[i].type == ZYDIS_OPERAND_TYPE_IMMEDIATE && operands[i].imm.is_relative)
+				{
+					ZyanU64 target_abs = 0;
+					ZydisCalcAbsoluteAddress(&insn, &operands[i], reinterpret_cast<ZyanU64>(src + stolen_bytes), &target_abs);
+
+					ZyanI64 new_disp = static_cast<ZyanI64>(target_abs) - static_cast<ZyanI64>(reinterpret_cast<uintptr_t>(tramp + tramp_bytes) + insn.length);
+					std::memcpy(tramp + tramp_bytes + insn.raw.imm[0].offset, &new_disp, sizeof(int32_t));
 				}
 			}
+#else
+			for (uint8_t i = 0; i < insn.operand_count_visible; ++i)
+			{
+				if (operands[i].type == ZYDIS_OPERAND_TYPE_IMMEDIATE && operands[i].imm.is_relative)
+				{
+					ZyanU64 target_abs = 0;
+					ZydisCalcAbsoluteAddress(&insn, &operands[i], reinterpret_cast<ZyanU64>(src + stolen_bytes), &target_abs);
+
+					ZyanI64 new_disp = static_cast<ZyanI64>(target_abs) - static_cast<ZyanI64>(reinterpret_cast<uintptr_t>(tramp + tramp_bytes) + insn.length);
+					std::memcpy(tramp + tramp_bytes + insn.raw.imm[0].offset, &new_disp, sizeof(int32_t));
+				}
+			}
+#endif
+
+			stolen_bytes += insn.length;
+			tramp_bytes += insn.length;
 		}
-		absolute_jump(dst + emitted, reinterpret_cast<uintptr_t>(src + stolen));
-		info.trampoline_size = emitted + 14;
-		info.stolen_size = stolen;
-		info.patch_size = required;
-		std::memcpy(info.original_bytes, src, stolen);
-		if (required == 5)
-		{
-			info.relay = relay;
-			absolute_jump(relay, reinterpret_cast<uintptr_t>(detour));
-			info.patch_bytes[0] = 0xe9;
-			const auto displacement = static_cast<int32_t>(distance);
-			std::memcpy(info.patch_bytes + 1, &displacement, 4);
-		}
-		else
-			absolute_jump(info.patch_bytes, reinterpret_cast<uintptr_t>(detour));
-		FlushInstructionCache(GetCurrentProcess(), slot, 512);
+
+		out_info.stolen_size = stolen_bytes;
+		std::memcpy(out_info.original_bytes, target, stolen_bytes);
+
+#if defined(_M_X64) || defined(__x86_64__)
+		auto* back_jmp = reinterpret_cast<jmp_abs_x64*>(tramp + tramp_bytes);
+		back_jmp->opcode0 = 0xFF;
+		back_jmp->opcode1 = 0x25;
+		back_jmp->dummy = 0x00000000;
+		back_jmp->address = reinterpret_cast<uint64_t>(src + stolen_bytes);
+#else
+		tramp[tramp_bytes] = 0xE9;
+		intptr_t back_rel = reinterpret_cast<intptr_t>(src + stolen_bytes) - (reinterpret_cast<intptr_t>(tramp + tramp_bytes) + 5);
+		std::memcpy(&tramp[tramp_bytes + 1], &back_rel, sizeof(int32_t));
+#endif
+
+		out_info.trampoline = slot;
 		return true;
-	}
-	bool create_trampoline(void* target, void* detour, void* slot, hook_info& info)
-	{
-		__try
-		{
-			return build(target, detour, slot, info);
-		}
-		__except (EXCEPTION_EXECUTE_HANDLER)
-		{
-			return false;
-		}
 	}
 }
