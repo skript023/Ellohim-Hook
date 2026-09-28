@@ -1,13 +1,13 @@
 #pragma once
 #include "../common.hpp"
+#include "detour_hook.hpp"
 #include "../memory/handle.hpp"
 #include <vector>
 #include <string_view>
 
 namespace ellohim
 {
-	union xmm_reg
-	{
+	union xmm_reg {
 		uint8_t u8[16];
 		uint16_t u16[8];
 		uint32_t u32[4];
@@ -20,7 +20,7 @@ namespace ellohim
 	struct mid_context
 	{
 		xmm_reg xmm[16]; // XMM0 - XMM15
-		uint64_t rsp;    // Original stack pointer before hook
+		uint64_t rsp;    // Snapshot only; changing it does not redirect execution
 		uint64_t r15;
 		uint64_t r14;
 		uint64_t r13;
@@ -37,7 +37,7 @@ namespace ellohim
 		uint64_t rbx;
 		uint64_t rax;
 		uint64_t rflags;
-		uintptr_t rip;   // Target instruction address
+		uintptr_t rip; // Snapshot only; changing it does not redirect execution
 	};
 #else
 	struct mid_context
@@ -66,15 +66,24 @@ namespace ellohim
 		mid_hook(const mid_hook&) = delete;
 		mid_hook& operator=(const mid_hook&) = delete;
 
-		mid_hook(mid_hook&& other) noexcept;
-		mid_hook& operator=(mid_hook&& other) noexcept;
+		mid_hook(mid_hook&& other) = delete;
+		mid_hook& operator=(mid_hook&& other) = delete;
 
 		bool enable();
 		bool disable();
 
-		[[nodiscard]] bool is_enabled() const noexcept { return m_enabled; }
-		[[nodiscard]] std::string_view name() const noexcept { return m_name; }
-		[[nodiscard]] void* target() const noexcept { return m_target; }
+		[[nodiscard]] bool is_enabled() const noexcept
+		{
+			return m_enabled;
+		}
+		[[nodiscard]] std::string_view name() const noexcept
+		{
+			return m_name;
+		}
+		[[nodiscard]] void* target() const noexcept
+		{
+			return m_target;
+		}
 
 		template<auto Callback>
 		static void add(std::string_view name, void* target)
@@ -83,11 +92,15 @@ namespace ellohim
 			m_mid_hooks.push_back(hook);
 		}
 
-		static std::vector<mid_hook*>& hooks() { return m_mid_hooks; }
+		static std::vector<mid_hook*>& hooks()
+		{
+			return m_mid_hooks;
+		}
 		static bool enable_all();
 		static bool disable_all();
 
 	private:
+		std::unique_ptr<detour_hook> m_backend;
 		std::string m_name;
 		void* m_target{nullptr};
 		mid_callback_t m_callback{nullptr};

@@ -39,13 +39,15 @@ namespace ellohim
 		void fix_hook_address();
 
 	private:
+		struct core_info;
 		void* m_target{nullptr};
 		void* m_detour{nullptr};
 		void* m_slot{nullptr};
 		void* m_trampoline{nullptr};
 
 		uint8_t m_original_bytes[32]{};
-		uint8_t m_patch_bytes[8]{};
+		uint8_t m_patch_bytes[32]{};
+		std::unique_ptr<core_info> m_info;
 		uint32_t m_patch_size{0};
 		uint32_t m_stolen_size{0};
 	};

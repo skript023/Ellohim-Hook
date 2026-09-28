@@ -6,6 +6,10 @@ project(EllohimHook LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+if (NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+    message(FATAL_ERROR "This hardened integration currently supports Windows x64 only")
+endif()
+
 if (MSVC)
     add_compile_options(/permissive- /bigobj)
     add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
@@ -67,7 +71,21 @@ target_include_directories(EllohimHook PRIVATE
 )
 
 # Examples and test demo
-option(ELLOHIM_BUILD_EXAMPLES "Build Ellohim-Hook example executable" ON)
+option(ELLOHIM_BUILD_EXAMPLES "Build Ellohim-Hook example executable" OFF)
+
+option(ELLOHIM_BUILD_TESTS "Build native hook regression tests" OFF)
+if(ELLOHIM_BUILD_TESTS)
+    enable_testing()
+    add_executable(ellohim_hook_tests tests/hooks.cpp)
+    add_library(ellohim_mono_bridge SHARED tests/mono_bridge.cpp)
+    target_link_libraries(ellohim_mono_bridge PRIVATE EllohimHook)
+    set_target_properties(ellohim_mono_bridge PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/hook-tests" LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/hook-tests")
+    target_link_libraries(ellohim_hook_tests PRIVATE EllohimHook)
+    target_include_directories(ellohim_hook_tests PRIVATE src/hooking)
+    set_target_properties(ellohim_hook_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/hook-tests")
+    add_test(NAME ellohim_hooks COMMAND ellohim_hook_tests)
+    set_tests_properties(ellohim_hooks PROPERTIES TIMEOUT 30)
+endif()
 
 if (ELLOHIM_BUILD_EXAMPLES)
     add_executable(EllohimHookExample examples/main.cpp)

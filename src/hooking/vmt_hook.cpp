@@ -12,8 +12,13 @@ namespace ellohim
 		std::size_t count = 0;
 		MEMORY_BASIC_INFORMATION mbi{};
 
-		while (table[count] != nullptr)
+		while (count < 4096)
 		{
+			MEMORY_BASIC_INFORMATION slot{};
+			if (!VirtualQuery(table + count, &slot, sizeof(slot)) || slot.State != MEM_COMMIT || (slot.Protect & (PAGE_GUARD | PAGE_NOACCESS)) || reinterpret_cast<uintptr_t>(table + count + 1) > reinterpret_cast<uintptr_t>(slot.BaseAddress) + slot.RegionSize)
+				break;
+			if (!table[count])
+				break;
 			if (VirtualQuery(table[count], &mbi, sizeof(mbi)) == 0)
 				break;
 
@@ -47,11 +52,16 @@ namespace ellohim
 			num_funcs = count_virtual_functions(m_original_table);
 		}
 
+		if (!num_funcs || num_funcs > 4096)
+			throw std::runtime_error("Invalid vtable size");
 		m_num_funcs = num_funcs + 1;
 		m_new_table = std::make_unique<void*[]>(m_num_funcs);
 
 		// Copy RTTI Complete Object Locator pointer (index -1) and all function pointers
-		std::copy_n(m_original_table - 1, m_num_funcs, m_new_table.get());
+		std::copy_n(m_original_table, num_funcs, m_new_table.get() + 1);
+		MEMORY_BASIC_INFORMATION prefix{};
+		if (VirtualQuery(m_original_table - 1, &prefix, sizeof(prefix)) && prefix.State == MEM_COMMIT && !(prefix.Protect & (PAGE_GUARD | PAGE_NOACCESS)))
+			m_new_table[0] = m_original_table[-1];
 
 		logger::info("Created vmt_hook for object at {:p} ({} virtual functions)", obj, num_funcs);
 	}
@@ -102,7 +112,7 @@ namespace ellohim
 
 	void vmt_hook::hook(std::size_t index, void* func)
 	{
-		if (index + 1 >= m_num_funcs)
+		if (index >= num_funcs())
 		{
 			throw std::out_of_range(std::format("vmt_hook::hook index {} out of range (max: {})", index, num_funcs() - 1));
 		}
@@ -111,7 +121,7 @@ namespace ellohim
 
 	void vmt_hook::unhook(std::size_t index)
 	{
-		if (index + 1 >= m_num_funcs)
+		if (index >= num_funcs())
 		{
 			throw std::out_of_range(std::format("vmt_hook::unhook index {} out of range (max: {})", index, num_funcs() - 1));
 		}
@@ -122,7 +132,8 @@ namespace ellohim
 	{
 		if (m_object && !m_is_enabled)
 		{
-			*m_object = m_new_table.get() + 1;
+			if (InterlockedCompareExchangePointer(reinterpret_cast<void* volatile*>(m_object), m_new_table.get() + 1, m_original_table) != m_original_table)
+				throw std::runtime_error("Vtable changed before hook enable");
 			m_is_enabled = true;
 		}
 	}
@@ -131,7 +142,7 @@ namespace ellohim
 	{
 		if (m_object && m_is_enabled)
 		{
-			*m_object = m_original_table;
+			InterlockedCompareExchangePointer(reinterpret_cast<void* volatile*>(m_object), m_original_table, m_new_table.get() + 1);
 			m_is_enabled = false;
 		}
 	}

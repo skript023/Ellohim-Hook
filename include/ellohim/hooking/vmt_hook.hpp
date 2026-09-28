@@ -21,6 +21,8 @@ namespace ellohim
 		template<typename T>
 		[[nodiscard]] T get_original(std::size_t index) const
 		{
+			if (index >= num_funcs())
+				throw std::out_of_range("Vtable original index out of range");
 			if (!m_original_table)
 				return nullptr;
 			return reinterpret_cast<T>(m_original_table[index]);

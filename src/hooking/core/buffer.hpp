@@ -1,10 +1,10 @@
 #pragma once
 
 #ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
+	#define WIN32_LEAN_AND_MEAN
 #endif
 #ifndef NOMINMAX
-#define NOMINMAX
+	#define NOMINMAX
 #endif
 #include <windows.h>
 #include <cstdint>
@@ -13,7 +13,7 @@
 namespace ellohim::core
 {
 #if defined(_M_X64) || defined(__x86_64__)
-	constexpr std::size_t MEMORY_SLOT_SIZE = 64;
+	constexpr std::size_t MEMORY_SLOT_SIZE = 512;
 #else
 	constexpr std::size_t MEMORY_SLOT_SIZE = 32;
 #endif

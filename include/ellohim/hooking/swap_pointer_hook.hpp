@@ -12,8 +12,14 @@ namespace ellohim
 		void enable();
 		void disable();
 
-		[[nodiscard]] bool is_enabled() const noexcept { return m_enabled; }
-		[[nodiscard]] std::string_view name() const noexcept { return m_name; }
+		[[nodiscard]] bool is_enabled() const noexcept
+		{
+			return m_enabled;
+		}
+		[[nodiscard]] std::string_view name() const noexcept
+		{
+			return m_name;
+		}
 
 		template<typename T>
 		[[nodiscard]] T get_original() const noexcept

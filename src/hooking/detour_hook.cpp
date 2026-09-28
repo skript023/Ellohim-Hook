@@ -1,179 +1,128 @@
 #include "ellohim/hooking/detour_hook.hpp"
-#include "ellohim/logger.hpp"
 #include "core/buffer.hpp"
 #include "core/trampoline.hpp"
 #include "core/thread_freezer.hpp"
 #include <cstring>
-
 namespace ellohim
 {
-	static bool resolve_jump_chain(void*& target)
+	struct detour_hook::core_info
 	{
-		__try
-		{
-			auto ptr = memory::handle(target);
-			std::size_t max_depth = 16;
-			bool resolved = true;
-
-			while (resolved && max_depth-- > 0 && ptr)
-			{
-				const auto opcode = ptr.as<std::uint8_t&>();
-				if (opcode == 0xE9) // jmp rel32
-				{
-					ptr = ptr.add(1).rip();
-				}
-				else if (opcode == 0xEB) // jmp rel8
-				{
-					const auto rel8 = ptr.add(1).as<std::int8_t&>();
-					ptr = ptr.add(2).add(rel8);
-				}
-#if defined(_M_X64) || defined(__x86_64__)
-				else if (opcode == 0xFF && ptr.add(1).as<std::uint8_t&>() == 0x25) // jmp qword ptr [rip + disp32]
-				{
-					auto* target_ptr = ptr.add(2).rip().as<void**>();
-					if (target_ptr && *target_ptr)
-					{
-						ptr = memory::handle(*target_ptr);
-					}
-					else
-					{
-						resolved = false;
-					}
-				}
-#endif
-				else
-				{
-					resolved = false;
-				}
-			}
-
-			target = ptr.as<void*>();
-			return true;
-		}
-		__except (EXCEPTION_EXECUTE_HANDLER)
-		{
-			return false;
-		}
-	}
-
+		core::hook_info hook;
+	};
 	detour_hook::detour_hook(std::string_view name, void* target, void* detour) :
 	    detour_base(name),
 	    m_target(target),
-	    m_detour(detour)
+	    m_detour(detour),
+	    m_info(std::make_unique<core_info>())
 	{
-		logger::info("Creating native detour hook '{}' at {:p} -> {:p}", m_name, m_target, m_detour);
-		if (!m_target)
-		{
-			throw std::runtime_error(std::format("Failed to create hook '{}': target function pointer is null", m_name));
-		}
-		if (!m_detour)
-		{
-			throw std::runtime_error(std::format("Failed to create hook '{}': detour function pointer is null", m_name));
-		}
-
-		fix_hook_address();
-
-		m_slot = core::allocate_slot(m_target);
+		if (!target || !detour)
+			throw std::runtime_error("Null detour target/callback");
+		// Patch the actual entry, including another hook's branch if present; do not chase into its callback.
+		m_slot = core::allocate_slot(target);
 		if (!m_slot)
 		{
-			throw std::runtime_error(std::format("Failed to allocate 2GB-range memory slot for hook '{}'", m_name));
+			const auto near_error = GetLastError();
+			m_slot = VirtualAlloc(nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+			if (!m_slot)
+				throw std::runtime_error(std::format("Hook '{}': near allocation failed ({}) and absolute fallback allocation failed ({})", name, near_error, GetLastError()));
+			logger::warning("Hook '{}': near allocation failed ({}); trying absolute entry patch", name, near_error);
 		}
-
-		core::hook_info info{};
-		if (!core::create_trampoline(m_target, m_detour, m_slot, info))
+		if (!core::create_trampoline(target, detour, m_slot, m_info->hook))
 		{
+			const auto failed_slot = reinterpret_cast<uintptr_t>(m_slot);
 			core::free_slot(m_slot);
 			m_slot = nullptr;
-			throw std::runtime_error(std::format("Failed to create trampoline for hook '{}' at {:p}", m_name, m_target));
+			throw std::runtime_error(std::format("Hook '{}': prolog cannot be safely relocated at {:p}, trampoline 0x{:X}", name, target, failed_slot));
 		}
-
-		m_trampoline = info.trampoline;
-		m_patch_size = info.patch_size;
-		m_stolen_size = info.stolen_size;
-		std::memcpy(m_original_bytes, info.original_bytes, info.stolen_size);
-		std::memcpy(m_patch_bytes, info.patch_bytes, info.patch_size);
-
-		logger::info("Trampoline for hook '{}' created at {:p}", m_name, m_trampoline);
+		m_trampoline = m_slot;
+		m_patch_size = m_info->hook.patch_size;
+		m_stolen_size = m_info->hook.stolen_size;
+		std::memcpy(m_original_bytes, m_info->hook.original_bytes, m_stolen_size);
+		std::memcpy(m_patch_bytes, m_info->hook.patch_bytes, m_patch_size);
+		logger::info("Hook '{}': target {:p}, trampoline {:p}, patch {} bytes", name, target, m_slot, m_patch_size);
 	}
-
 	detour_hook::~detour_hook() noexcept
 	{
-		if (m_enabled)
+		// Callers must stop hook callbacks before destroying/unloading their code.
+		if (m_enabled && !disable())
 		{
-			disable();
+			logger::error("Hook '{}' could not be disabled; retaining trampoline", m_name);
+			return;
 		}
-		if (m_slot)
-		{
-			core::free_slot(m_slot);
-			m_slot = nullptr;
-			m_trampoline = nullptr;
-		}
-		logger::info("Removed hook '{}'", m_name);
+		core::free_slot(m_slot);
 	}
-
 	bool detour_hook::enable()
 	{
-		if (m_enabled || !m_target)
+		if (m_enabled)
 			return true;
-
-		core::thread_freezer freezer;
-
-		DWORD old_protect{};
-		if (!VirtualProtect(m_target, m_patch_size, PAGE_EXECUTE_READWRITE, &old_protect))
+		bool patched = false;
+		DWORD error = ERROR_SUCCESS;
 		{
-			throw std::runtime_error(std::format("VirtualProtect failed while enabling hook '{}'", m_name));
+			core::thread_freezer freezer;
+			DWORD protection{};
+			if (std::memcmp(m_target, m_original_bytes, m_patch_size) != 0)
+				error = ERROR_INVALID_DATA;
+			else if (!VirtualProtect(m_target, m_patch_size, PAGE_EXECUTE_READWRITE, &protection))
+				error = GetLastError();
+			else
+			{
+				if (freezer.relocate(m_info->hook, true))
+				{
+					std::memcpy(m_target, m_patch_bytes, m_patch_size);
+					FlushInstructionCache(GetCurrentProcess(), m_target, m_patch_size);
+					patched = true;
+				}
+				DWORD ignored{};
+				VirtualProtect(m_target, m_patch_size, protection, &ignored);
+			}
 		}
-
-		std::memcpy(m_target, m_patch_bytes, m_patch_size);
-		VirtualProtect(m_target, m_patch_size, old_protect, &old_protect);
-		FlushInstructionCache(GetCurrentProcess(), m_target, m_patch_size);
-
+		if (!patched)
+			throw std::runtime_error(std::format("Hook '{}': patch aborted (error {} or thread inside relocated instruction)", m_name, error));
 		m_enabled = true;
 		return true;
 	}
-
 	bool detour_hook::disable()
 	{
-		if (!m_enabled || !m_target)
+		if (!m_enabled)
 			return true;
-
-		core::thread_freezer freezer;
-
-		DWORD old_protect{};
-		if (!VirtualProtect(m_target, m_patch_size, PAGE_EXECUTE_READWRITE, &old_protect))
+		try
+		{
+			core::thread_freezer freezer;
+			if (std::memcmp(m_target, m_patch_bytes, m_patch_size) != 0)
+				return false;
+			DWORD protection{};
+			if (!VirtualProtect(m_target, m_patch_size, PAGE_EXECUTE_READWRITE, &protection))
+				return false;
+			const bool safe = freezer.relocate(m_info->hook, false);
+			if (safe)
+			{
+				std::memcpy(m_target, m_original_bytes, m_patch_size);
+				FlushInstructionCache(GetCurrentProcess(), m_target, m_patch_size);
+				m_enabled = false;
+			}
+			DWORD ignored{};
+			VirtualProtect(m_target, m_patch_size, protection, &ignored);
+			return safe;
+		}
+		catch (...)
 		{
 			return false;
 		}
-
-		std::memcpy(m_target, m_original_bytes, m_patch_size);
-		VirtualProtect(m_target, m_patch_size, old_protect, &old_protect);
-		FlushInstructionCache(GetCurrentProcess(), m_target, m_patch_size);
-
-		m_enabled = false;
-		return true;
 	}
-
 	void detour_hook::enable_immediately()
 	{
 		enable();
 	}
-
 	void detour_hook::disable_immediately()
 	{
-		disable();
+		if (!disable())
+			throw std::runtime_error("Could not disable detour");
 	}
-
 	void* detour_hook::get_original_ptr()
 	{
 		return m_trampoline;
 	}
-
 	void detour_hook::fix_hook_address()
 	{
-		if (!resolve_jump_chain(m_target))
-		{
-			logger::error("Exception occurred while fixing hook address for '{}'", m_name);
-			throw std::runtime_error(std::format("Failed to fix hook address for '{}'", m_name));
-		}
 	}
 }
