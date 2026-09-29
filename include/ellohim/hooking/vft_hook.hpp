@@ -20,9 +20,10 @@ namespace ellohim
 		vft_hook(const vft_hook&) = delete;
 		vft_hook& operator=(const vft_hook&) = delete;
 
-		vft_hook(vft_hook&& other) noexcept;
-		vft_hook& operator=(vft_hook&& other) noexcept;
+		vft_hook(vft_hook&& other) = delete;
+		vft_hook& operator=(vft_hook&& other) = delete;
 
+		// Direct pointer assignments, not atomic. Quiesce virtual calls during changes.
 		bool enable();
 		bool disable();
 
@@ -45,9 +46,13 @@ namespace ellohim
 		template<auto Detour>
 		static void add(std::string_view name, void* instance, std::size_t index)
 		{
-			auto* hook = new vft_hook(name, instance, index, reinterpret_cast<void*>(Detour));
-			vft_helper<Detour>::m_hook = hook;
-			m_vft_hooks.push_back(hook);
+			if (vft_helper<Detour>::m_hook) throw std::logic_error("Duplicate VFT callback");
+			auto hook = std::make_unique<vft_hook>(name, instance, index, reinterpret_cast<void*>(Detour));
+			m_vft_hooks.push_back(hook.get());
+			hook->m_clear_binding = [](vft_hook* value) {
+				if (vft_helper<Detour>::m_hook == value) vft_helper<Detour>::m_hook = nullptr;
+			};
+			vft_helper<Detour>::m_hook = hook.release();
 		}
 
 		template<auto Detour>
@@ -69,6 +74,8 @@ namespace ellohim
 		void* m_detour{nullptr};
 		void* m_original{nullptr};
 		bool m_enabled{false};
+		bool m_writable{false};
+		void (*m_clear_binding)(vft_hook*){nullptr};
 
 		static inline std::vector<vft_hook*> m_vft_hooks;
 	};

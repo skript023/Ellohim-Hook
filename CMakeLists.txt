@@ -6,6 +6,10 @@ project(EllohimHook LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+if(NOT WIN32 OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+    message(FATAL_ERROR "Ellohim-Hook currently supports Windows x64 only")
+endif()
+
 if (MSVC)
     add_compile_options(/permissive- /bigobj)
     add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
@@ -93,6 +97,16 @@ target_link_libraries(EllohimHook PUBLIC Zydis)
 
 # Examples and test demo
 option(ELLOHIM_BUILD_EXAMPLES "Build Ellohim-Hook example executable" ON)
+
+option(ELLOHIM_BUILD_TESTS "Build hook regression tests" OFF)
+if(ELLOHIM_BUILD_TESTS)
+    enable_testing()
+    add_executable(ellohim_hook_tests tests/hooks.cpp)
+    target_link_libraries(ellohim_hook_tests PRIVATE EllohimHook)
+    target_include_directories(ellohim_hook_tests PRIVATE src/hooking)
+    add_test(NAME ellohim_hooks COMMAND ellohim_hook_tests)
+    set_tests_properties(ellohim_hooks PROPERTIES TIMEOUT 60)
+endif()
 
 if (ELLOHIM_BUILD_EXAMPLES)
     add_executable(EllohimHookExample examples/main.cpp)

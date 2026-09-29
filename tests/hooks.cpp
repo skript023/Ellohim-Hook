@@ -1,6 +1,10 @@
 #include <ellohim/hooking/detour_hook.hpp>
 #include <ellohim/hooking/mid_hook.hpp>
 #include <ellohim/hooking/vmt_hook.hpp>
+#include <ellohim/hooking.hpp>
+#include <ellohim/hooking/swap_pointer_hook.hpp>
+#include <ellohim/hooking/vft_hook.hpp>
+#include <ellohim/hooking/iat_hook.hpp>
 #include "core/trampoline.hpp"
 #include <atomic>
 #include <thread>
@@ -34,6 +38,157 @@ static int replacement()
 {
 	return 42;
 }
+static int pointer_original() { return 7; }
+static int pointer_other() { return 99; }
+struct controlled_hook : ellohim::detour_base
+{
+	bool fail_enable{}, fail_disable{}, throws{};
+	controlled_hook() : detour_base("controlled") {}
+	bool enable() override
+	{
+		if (throws) throw std::runtime_error("Injected activation failure");
+		if (fail_enable) return false;
+		m_enabled = true; return true;
+	}
+	bool disable() override { if (fail_disable) return false; m_enabled = false; return true; }
+	void* get_original_ptr() override { return nullptr; }
+};
+static void lifecycle_tests()
+{
+	controlled_hook existing, first, failing;
+	existing.enable();
+	failing.fail_enable = true;
+	check(!ellohim::detour_base::enable_all(), "Batch failure was lost");
+	check(existing.is_enabled() && !first.is_enabled(), "Batch rollback changed preexisting hook");
+	failing.throws = true;
+	bool rejected = false;
+	try { ellohim::detour_base::enable_all(); } catch (...) { rejected = true; }
+	check(rejected && !first.is_enabled(), "Exception did not roll back batch");
+	failing.throws = false;
+	{
+		ellohim::hooking manager;
+		failing.fail_enable = false;
+		manager.enable();
+		first.fail_disable = true;
+		rejected = false;
+		try { manager.disable(); } catch (...) { rejected = true; }
+		check(rejected && manager.is_enabled(), "Manager lost partial enabled state");
+		first.fail_disable = false;
+		manager.disable();
+	}
+	check(ellohim::detour_base::hooks().size() == 3, "Manager deleted externally owned hooks");
+}
+static void pointer_tests()
+{
+	using fn = int (*)();
+	void* original = reinterpret_cast<void*>(&pointer_original);
+	void* replacement_ptr = reinterpret_cast<void*>(&replacement);
+	std::atomic<void*> slot{original};
+	ellohim::swap_pointer_hook hook("atomic slot", slot, replacement_ptr);
+	std::atomic<bool> stop{false}, bad{false};
+	std::atomic<unsigned> ready{0};
+	std::atomic<size_t> calls{0};
+	std::vector<std::jthread> readers;
+	for (int i = 0; i < 4; ++i)
+		readers.emplace_back([&](std::stop_token token) {
+			++ready;
+			while (!stop.load() && !token.stop_requested())
+			{
+				const auto result = reinterpret_cast<fn>(slot.load())();
+				if (result != 7 && result != 42) bad = true;
+				if (hook.get_original<fn>()() != 7) bad = true;
+				++calls;
+			}
+		});
+	while (ready != 4) std::this_thread::yield();
+	for (int i = 0; i < 100000; ++i) { hook.enable(); hook.disable(); }
+	stop = true;
+	readers.clear();
+	check(!bad && calls > 0 && slot == original, "Atomic dispatch corrupted under contention");
+	hook.enable();
+	slot = reinterpret_cast<void*>(&pointer_other);
+	bool rejected = false;
+	try { hook.disable(); } catch (...) { rejected = true; }
+	check(rejected && hook.is_enabled() && reinterpret_cast<fn>(slot.load())() == 99, "Restore overwrote another hook");
+	slot = replacement_ptr;
+	hook.disable();
+	alignas(std::atomic_ref<void*>::required_alignment) void* writable = original;
+	ellohim::swap_pointer_hook raw("writable slot", &writable, replacement_ptr);
+	raw.enable();
+	check(reinterpret_cast<fn>(ellohim::swap_pointer_hook::load_target(&writable))() == 42, "Writable atomic_ref swap failed");
+	raw.disable();
+	stop = false;
+	std::jthread raw_reader([&](std::stop_token token) {
+		while (!stop && !token.stop_requested())
+		{
+			const auto result = reinterpret_cast<fn>(ellohim::swap_pointer_hook::load_target(&writable))();
+			if (result != 7 && result != 42) bad = true;
+		}
+	});
+	for (int i = 0; i < 20000; ++i) { raw.enable(); raw.disable(); }
+	stop = true;
+	raw_reader.join();
+	check(!bad, "atomic_ref readers observed a corrupted pointer");
+	page storage;
+	auto** readonly_slot = reinterpret_cast<void**>(storage.data);
+	*readonly_slot = original;
+	DWORD previous{};
+	check(VirtualProtect(storage.data, 4096, PAGE_READONLY, &previous) != FALSE, "Cannot protect test slot");
+	ellohim::swap_pointer_hook protected_hook("readonly slot", readonly_slot, replacement_ptr);
+	protected_hook.enable();
+	check(reinterpret_cast<fn>(*readonly_slot)() == 42, "Readonly slot swap failed");
+	protected_hook.disable();
+	MEMORY_BASIC_INFORMATION region{};
+	VirtualQuery(readonly_slot, &region, sizeof(region));
+	check(region.Protect == PAGE_READONLY && *readonly_slot == original, "Readonly protection/original not restored");
+	{
+		ellohim::vft_hook vft("slot", readonly_slot, 0, replacement_ptr);
+		check(vft.enable() && reinterpret_cast<fn>(*readonly_slot)() == 42, "VFT enable failed");
+		check(vft.disable() && *readonly_slot == original, "VFT disable failed");
+	}
+	bool invalid_rejected = false;
+	try { ellohim::swap_pointer_hook invalid("invalid", reinterpret_cast<void**>(storage.data + 1), replacement_ptr); }
+	catch (...) { invalid_rejected = true; }
+	check(invalid_rejected, "Misaligned pointer accepted");
+	std::cout << "PASS: 100000 atomic swaps with four readers, conflicts, writable and readonly slots\n";
+}
+static void iat_tests()
+{
+	page image;
+	std::memset(image.data, 0, 4096);
+	auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(image.data);
+	dos->e_magic = IMAGE_DOS_SIGNATURE; dos->e_lfanew = 128;
+	auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(image.data + 128);
+	nt->Signature = IMAGE_NT_SIGNATURE;
+	nt->FileHeader.SizeOfOptionalHeader = sizeof(IMAGE_OPTIONAL_HEADER64);
+	nt->OptionalHeader.Magic = IMAGE_NT_OPTIONAL_HDR64_MAGIC;
+	nt->OptionalHeader.SizeOfImage = 4096;
+	nt->OptionalHeader.NumberOfRvaAndSizes = IMAGE_NUMBEROF_DIRECTORY_ENTRIES;
+	nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT] = {512, 40};
+	auto* desc = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(image.data + 512);
+	desc->Name = 600; desc->OriginalFirstThunk = 640; desc->FirstThunk = 672;
+	std::memcpy(image.data + 600, "test.dll", 9);
+	auto* names = reinterpret_cast<IMAGE_THUNK_DATA64*>(image.data + 640);
+	names->u1.AddressOfData = 704;
+	std::memcpy(image.data + 706, "Example", 8);
+	auto** slot = reinterpret_cast<void**>(image.data + 672);
+	*slot = reinterpret_cast<void*>(&pointer_original);
+	{
+		ellohim::iat_hook hook("synthetic image", reinterpret_cast<HMODULE>(image.data), "test.dll", "Example", reinterpret_cast<void*>(&replacement));
+		check(hook.enable() && reinterpret_cast<int(*)()>(*slot)() == 42, "IAT enable failed");
+		check(hook.disable() && reinterpret_cast<int(*)()>(*slot)() == 7, "IAT restore failed");
+	}
+	desc->OriginalFirstThunk = 0;
+	bool rejected = false;
+	try { ellohim::iat_hook hook("missing INT", reinterpret_cast<HMODULE>(image.data), "test.dll", "Example", reinterpret_cast<void*>(&replacement)); }
+	catch (...) { rejected = true; }
+	check(rejected, "Loaded IAT addresses were treated as name RVAs");
+	desc->OriginalFirstThunk = 640; desc->Name = 4095; image.data[4095] = 'x';
+	rejected = false;
+	try { ellohim::iat_hook hook("unterminated name", reinterpret_cast<HMODULE>(image.data), "test.dll", "Example", reinterpret_cast<void*>(&replacement)); }
+	catch (...) { rejected = true; }
+	check(rejected, "Out-of-image import string accepted");
+}
 static int mid_seen;
 static LPVOID(WINAPI* original_convert)(LPVOID);
 static LPVOID WINAPI convert_detour(LPVOID value)
@@ -63,6 +218,9 @@ try
 {
 	ellohim::logger::set_callback([](auto, auto) {
 	});
+	lifecycle_tests();
+	pointer_tests();
+	iat_tests();
 	using fn = int (*)();
 	using arg_fn = int (*)(int);
 	page code;

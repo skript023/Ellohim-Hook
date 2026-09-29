@@ -13,7 +13,9 @@ namespace ellohim::core
 			HANDLE handle;
 			bool suspended{};
 			CONTEXT context{};
+			CONTEXT original{};
 			bool changed{};
+			bool applied{};
 		};
 		std::vector<entry> m_threads;
 
@@ -107,6 +109,9 @@ namespace ellohim::core
 			{
 				if (!thread.suspended)
 					continue;
+				thread.original = thread.context;
+				thread.changed = false;
+				thread.applied = false;
 				auto& ip = thread.context.Rip;
 				bool mapped = false;
 				for (uint32_t i = 0; i < info.count; ++i)
@@ -134,8 +139,21 @@ namespace ellohim::core
 				thread.changed = mapped;
 			}
 			for (auto& thread : m_threads)
-				if (thread.changed && !SetThreadContext(thread.handle, &thread.context))
+			{
+				if (!thread.changed) continue;
+				if (!SetThreadContext(thread.handle, &thread.context))
+				{
+					for (auto& previous : m_threads)
+					{
+						// Never resume a process with partially restored instruction pointers.
+						if (previous.applied && !SetThreadContext(previous.handle, &previous.original))
+							std::terminate();
+						previous.context = previous.original;
+					}
 					return false;
+				}
+				thread.applied = true;
+			}
 			return true;
 		}
 		thread_freezer(const thread_freezer&) = delete;

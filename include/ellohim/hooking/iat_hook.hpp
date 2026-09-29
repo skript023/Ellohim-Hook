@@ -15,8 +15,8 @@ namespace ellohim
 		iat_hook(const iat_hook&) = delete;
 		iat_hook& operator=(const iat_hook&) = delete;
 
-		iat_hook(iat_hook&& other) noexcept;
-		iat_hook& operator=(iat_hook&& other) noexcept;
+		iat_hook(iat_hook&& other) = delete;
+		iat_hook& operator=(iat_hook&& other) = delete;
 
 		bool enable();
 		bool disable();
@@ -40,9 +40,13 @@ namespace ellohim
 		template<auto Detour>
 		static void add(std::string_view name, HMODULE module_to_hook, std::string_view target_dll, std::string_view function_name)
 		{
-			auto* hook = new iat_hook(name, module_to_hook, target_dll, function_name, reinterpret_cast<void*>(Detour));
-			iat_helper<Detour>::m_hook = hook;
-			m_iat_hooks.push_back(hook);
+			if (iat_helper<Detour>::m_hook) throw std::logic_error("Duplicate IAT callback");
+			auto hook = std::make_unique<iat_hook>(name, module_to_hook, target_dll, function_name, reinterpret_cast<void*>(Detour));
+			m_iat_hooks.push_back(hook.get());
+			hook->m_clear_binding = [](iat_hook* value) {
+				if (iat_helper<Detour>::m_hook == value) iat_helper<Detour>::m_hook = nullptr;
+			};
+			iat_helper<Detour>::m_hook = hook.release();
 		}
 
 		template<auto Detour>
@@ -64,6 +68,8 @@ namespace ellohim
 		void* m_detour{nullptr};
 		void* m_original{nullptr};
 		bool m_enabled{false};
+		bool m_writable{false};
+		void (*m_clear_binding)(iat_hook*){nullptr};
 
 		static inline std::vector<iat_hook*> m_iat_hooks;
 	};

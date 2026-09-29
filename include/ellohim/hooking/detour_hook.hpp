@@ -7,7 +7,7 @@ namespace ellohim
 	class detour_hook : public detour_base
 	{
 	public:
-		explicit detour_hook(std::string_view name, void* target, void* detour);
+		explicit detour_hook(std::string_view name, void* target, void* detour, bool register_hook = true);
 		~detour_hook() noexcept override;
 
 		bool enable() override;
@@ -27,7 +27,9 @@ namespace ellohim
 		template<auto T>
 		static void add(std::string_view name, void* target)
 		{
-			detour_base::add<T>(new detour_hook(name, target, reinterpret_cast<void*>(T)));
+			auto hook = std::make_unique<detour_hook>(name, target, reinterpret_cast<void*>(T));
+			detour_base::add<T>(hook.get());
+			hook.release();
 		}
 
 		template<auto T>

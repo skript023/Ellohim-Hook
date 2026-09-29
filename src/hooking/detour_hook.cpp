@@ -5,12 +5,17 @@
 #include <cstring>
 namespace ellohim
 {
+	static bool bytes_equal(const void* target, const void* expected, size_t size) noexcept
+	{
+		__try { return std::memcmp(target, expected, size) == 0; }
+		__except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+	}
 	struct detour_hook::core_info
 	{
 		core::hook_info hook;
 	};
-	detour_hook::detour_hook(std::string_view name, void* target, void* detour) :
-	    detour_base(name),
+	detour_hook::detour_hook(std::string_view name, void* target, void* detour, bool register_hook) :
+	    detour_base(name, register_hook),
 	    m_target(target),
 	    m_detour(detour),
 	    m_info(std::make_unique<core_info>())
@@ -37,6 +42,22 @@ namespace ellohim
 		m_trampoline = m_slot;
 		m_patch_size = m_info->hook.patch_size;
 		m_stolen_size = m_info->hook.stolen_size;
+		SYSTEM_INFO system{};
+		GetSystemInfo(&system);
+		// A single protection value cannot restore two differently protected pages.
+		if (reinterpret_cast<uintptr_t>(target) % system.dwPageSize + m_patch_size > system.dwPageSize)
+		{
+			core::free_slot(m_slot);
+			m_slot = nullptr;
+			throw std::runtime_error("Entry patch crosses a page boundary");
+		}
+		DWORD previous{};
+		if (!VirtualProtect(m_slot, 512, PAGE_EXECUTE_READ, &previous))
+		{
+			core::free_slot(m_slot);
+			m_slot = nullptr;
+			throw std::runtime_error("Could not seal trampoline memory");
+		}
 		std::memcpy(m_original_bytes, m_info->hook.original_bytes, m_stolen_size);
 		std::memcpy(m_patch_bytes, m_info->hook.patch_bytes, m_patch_size);
 		logger::info("Hook '{}': target {:p}, trampoline {:p}, patch {} bytes", name, target, m_slot, m_patch_size);
@@ -60,7 +81,7 @@ namespace ellohim
 		{
 			core::thread_freezer freezer;
 			DWORD protection{};
-			if (std::memcmp(m_target, m_original_bytes, m_patch_size) != 0)
+			if (!bytes_equal(m_target, m_original_bytes, m_stolen_size))
 				error = ERROR_INVALID_DATA;
 			else if (!VirtualProtect(m_target, m_patch_size, PAGE_EXECUTE_READWRITE, &protection))
 				error = GetLastError();
@@ -69,11 +90,11 @@ namespace ellohim
 				if (freezer.relocate(m_info->hook, true))
 				{
 					std::memcpy(m_target, m_patch_bytes, m_patch_size);
-					FlushInstructionCache(GetCurrentProcess(), m_target, m_patch_size);
+					if (!FlushInstructionCache(GetCurrentProcess(), m_target, m_patch_size)) std::terminate();
 					patched = true;
 				}
 				DWORD ignored{};
-				VirtualProtect(m_target, m_patch_size, protection, &ignored);
+				if (!VirtualProtect(m_target, m_patch_size, protection, &ignored)) std::terminate();
 			}
 		}
 		if (!patched)
@@ -88,7 +109,7 @@ namespace ellohim
 		try
 		{
 			core::thread_freezer freezer;
-			if (std::memcmp(m_target, m_patch_bytes, m_patch_size) != 0)
+			if (!bytes_equal(m_target, m_patch_bytes, m_patch_size))
 				return false;
 			DWORD protection{};
 			if (!VirtualProtect(m_target, m_patch_size, PAGE_EXECUTE_READWRITE, &protection))
@@ -97,11 +118,11 @@ namespace ellohim
 			if (safe)
 			{
 				std::memcpy(m_target, m_original_bytes, m_patch_size);
-				FlushInstructionCache(GetCurrentProcess(), m_target, m_patch_size);
+				if (!FlushInstructionCache(GetCurrentProcess(), m_target, m_patch_size)) std::terminate();
 				m_enabled = false;
 			}
 			DWORD ignored{};
-			VirtualProtect(m_target, m_patch_size, protection, &ignored);
+			if (!VirtualProtect(m_target, m_patch_size, protection, &ignored)) std::terminate();
 			return safe;
 		}
 		catch (...)
