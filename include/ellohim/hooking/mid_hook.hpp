@@ -88,8 +88,9 @@ namespace ellohim
 		template<auto Callback>
 		static void add(std::string_view name, void* target)
 		{
-			auto* hook = new mid_hook(name, target, Callback);
-			m_mid_hooks.push_back(hook);
+			auto hook = std::make_unique<mid_hook>(name, target, Callback);
+			m_mid_hooks.push_back(hook.get());
+			hook.release();
 		}
 
 		static std::vector<mid_hook*>& hooks()
@@ -98,6 +99,8 @@ namespace ellohim
 		}
 		static bool enable_all();
 		static bool disable_all();
+		static bool destroy_owned();
+		static bool any_enabled();
 
 	private:
 		std::unique_ptr<detour_hook> m_backend;

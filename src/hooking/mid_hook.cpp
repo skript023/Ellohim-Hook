@@ -1,4 +1,4 @@
-#include "ellohim/hooking/mid_hook.hpp"
+﻿#include "ellohim/hooking/mid_hook.hpp"
 #include "core/buffer.hpp"
 #include <cstring>
 namespace ellohim
@@ -23,6 +23,7 @@ namespace ellohim
 	}
 	mid_hook::~mid_hook() noexcept
 	{
+		std::erase(m_mid_hooks, this);
 		if (!disable())
 		{
 			m_backend.release();
@@ -30,7 +31,6 @@ namespace ellohim
 		}
 		m_backend.reset();
 		core::free_page_near(m_stub, m_stub_size);
-		std::erase(m_mid_hooks, this);
 	}
 	void mid_hook::fix_hook_address()
 	{
@@ -42,7 +42,7 @@ namespace ellohim
 		m_stub = VirtualAlloc(nullptr, m_stub_size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
 		if (!m_stub)
 			throw std::runtime_error("Could not allocate mid-hook stub");
-		m_backend = std::make_unique<detour_hook>(m_name, m_target, m_stub);
+		m_backend = std::make_unique<detour_hook>(m_name, m_target, m_stub, false);
 		std::vector<uint8_t> code;
 		auto bytes = [&](std::initializer_list<uint8_t> list) {
 			code.insert(code.end(), list);
@@ -100,7 +100,10 @@ namespace ellohim
 		if (code.size() > m_stub_size)
 			throw std::runtime_error("Mid-hook stub overflow");
 		std::memcpy(m_stub, code.data(), code.size());
-		FlushInstructionCache(GetCurrentProcess(), m_stub, code.size());
+		DWORD previous{};
+		if (!VirtualProtect(m_stub, m_stub_size, PAGE_EXECUTE_READ, &previous) ||
+		    !FlushInstructionCache(GetCurrentProcess(), m_stub, code.size()))
+			throw std::runtime_error("Could not seal mid-hook stub");
 	}
 	bool mid_hook::enable()
 	{
@@ -120,16 +123,47 @@ namespace ellohim
 	}
 	bool mid_hook::enable_all()
 	{
-		for (auto hook : m_mid_hooks)
-			if (!hook->enable())
-				return false;
+		std::vector<mid_hook*> activated;
+		activated.reserve(m_mid_hooks.size());
+		try
+		{
+			for (auto hook : m_mid_hooks)
+			{
+				if (hook->is_enabled()) continue;
+				activated.push_back(hook);
+				if (!hook->enable()) throw std::runtime_error("Mid-hook enable failed");
+			}
+		}
+		catch (...)
+		{
+			bool restored = true;
+			for (auto it = activated.rbegin(); it != activated.rend(); ++it)
+				restored = (*it)->disable() && restored;
+			if (!restored) throw std::runtime_error("Mid-hook rollback failed");
+			throw;
+		}
 		return true;
 	}
 	bool mid_hook::disable_all()
 	{
 		bool result = true;
-		for (auto hook : m_mid_hooks)
-			result = hook->disable() && result;
+		for (auto it = m_mid_hooks.rbegin(); it != m_mid_hooks.rend(); ++it)
+			result = (*it)->disable() && result;
+		return result;
+	}
+	bool mid_hook::any_enabled()
+	{
+		return std::any_of(m_mid_hooks.begin(), m_mid_hooks.end(), [](auto* hook) { return hook->is_enabled(); });
+	}
+	bool mid_hook::destroy_owned()
+	{
+		bool result = true;
+		for (size_t i = m_mid_hooks.size(); i > 0; --i)
+		{
+			auto* hook = m_mid_hooks[i - 1];
+			if (!hook->disable()) { result = false; continue; }
+			delete hook;
+		}
 		return result;
 	}
 }

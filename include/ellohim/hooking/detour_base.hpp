@@ -11,7 +11,7 @@ namespace ellohim
 		void (*m_clear_binding)(detour_base*){nullptr};
 
 	public:
-		explicit detour_base(std::string_view name);
+		explicit detour_base(std::string_view name, bool register_hook = true);
 		virtual ~detour_base();
 
 		detour_base(const detour_base&) = delete;
@@ -53,14 +53,23 @@ namespace ellohim
 
 		static bool enable_all();
 		static bool disable_all();
+		// Only hooks explicitly transferred through add() are owned by the registry.
+		static bool destroy_owned();
+		static bool any_enabled();
 
 	private:
 		static inline std::vector<detour_base*> m_detour_bases;
+		bool m_registry_owned{false};
 	};
 
 	template<auto detour_function>
 	inline void detour_base::add(detour_base* hook)
 	{
+		if (!hook)
+			throw std::invalid_argument("Null hook registration");
+		if (detour_helper<detour_function>::m_hook)
+			throw std::logic_error("Callback already has a registered hook");
+		hook->m_registry_owned = true;
 		detour_helper<detour_function>::m_hook = hook;
 		hook->m_clear_binding = [](detour_base* value) {
 			if (detour_helper<detour_function>::m_hook == value)

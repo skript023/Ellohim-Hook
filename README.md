@@ -1,20 +1,20 @@
 # Ellohim-Hook
 
-Modern C++ Hooking Library yang **100% Independent (Zero External Dependencies)**, dirancang dengan code style elegan dan zero overhead, kompatibel dengan arsitektur `Mono Hacking` / `BigBase`, serta mengadopsi best practices dari **SafetyHook** dan **PolyHook V2**.
+Library hooking C++20 untuk Windows x64, dengan API bergaya `Mono Hacking` / `BigBase`, mesin detour internal, dan decoder Zydis. Lihat [kontrak lifecycle dan concurrency](INTEGRATION.md) sebelum integrasi.
 
 ---
 
 ## 🌟 Mengapa Ellohim-Hook Berbeda?
 
-- **100% Independent & Self-Contained**:
+- **Mesin detour internal**:
   - **TIDAK memerlukan library eksternal** seperti MinHook, Detours, atau submodul lainnya.
-  - Memiliki mesin trampoline, memory slot allocator (2GB relative branch range), dan instruction decoder (HDE) bawaan sendiri yang dikompilasi langsung ke dalam static library.
-  - Zero CMake FetchContent / git submodules / external `.lib` dependencies.
+  - Memiliki mesin trampoline dan allocator dalam jangkauan relative branch; decoding instruksi menggunakan Zydis.
+  - CMake memakai `vendor/zydis` bila tersedia, atau mengambil Zydis v4.1.0 melalui FetchContent.
 
 - **Detour Hook (Native Inline / Trampoline Hook)**:
   - Compile-time static template dispatch (`detour_hook::add<hooks::func>` & `detour_base::get_original<hooks::func>()`), menghasilkan **zero runtime map lookup overhead**.
-  - **Thread-Safe Atomic Patching**: Membekukan thread lain dalam proses (`thread_freezer`) saat proses penulisan bytes hook untuk mencegah race condition.
-  - **Relocation & JMP Thunk Auto-Resolution** (seperti PolyHook & SafetyHook): Secara otomatis menelusuri jump chain (`0xE9` rel32, `0xEB` rel8, dan `0xFF 0x25` x64 indirect IAT stubs) menuju ke fungsi asli yang sebenarnya sebelum melakukan hook.
+  - **Patching dengan thread suspension**: Membekukan thread yang terenumerasi dan memetakan instruction pointer sebelum menulis patch. Operasi lifecycle harus diserialisasi oleh caller.
+  - **Relocation**: Memasang patch pada entry yang diberikan, merelokasi instruksi dan cabang ke trampoline tanpa mengikuti jump chain menuju callback hook lain.
   - **RIP-Relative Displacement Adjustment**: Secara otomatis merekalibrasi displacement instruksi 64-bit yang dipindahkan ke dalam buffer trampoline.
   - **SEH Exception-Protected**: Membaca memori target dengan aman menggunakan Structured Exception Handling (`__try / __except`).
 
@@ -27,7 +27,7 @@ Modern C++ Hooking Library yang **100% Independent (Zero External Dependencies)*
 - **Mid-Function Hook (`mid_hook`, Inspired by SafetyHook)**:
   - Mengintersepsi eksekusi di tengah-tengah fungsi tanpa mengubah jalannya program.
   - Menyimpan seluruh context register CPU (`mid_context`: RAX, RBX, RCX, RDX, RSI, RDI, RBP, R8-R15, RSP, RFLAGS, serta SIMD XMM0-XMM15).
-  - Melewatkan `mid_context&` ke callback `void(mid_context& ctx)` sehingga nilai register dapat dibaca maupun dimodifikasi langsung secara live!
+  - Melewatkan `mid_context&` ke callback `void(mid_context& ctx)`. GPR, flags, dan XMM dapat dimodifikasi; RSP/RIP hanya snapshot. Upper YMM/ZMM dan x87 tidak disimpan; callback tidak boleh melempar exception.
   - Menjalankan kembali instruksi yang digantikan dan melanjutkan eksekusi ke fungsi asli secara transparan.
 
 - **Memory Utilities**:
@@ -36,7 +36,8 @@ Modern C++ Hooking Library yang **100% Independent (Zero External Dependencies)*
   - `memory::range` & `memory::pattern`: Scan memori dengan signature IDA (`"48 89 5C 24 ? 48 89 6C 24"`).
 
 - **Swap Pointer Hook**:
-  - Mengganti pointer fungsi arbitrer / IAT dengan proteksi memori otomatis (`VirtualProtect`).
+  - Menyimpan original sekali dan mengganti slot secara atomik. Overload `std::atomic<void*>&` tidak memakai WinAPI; slot `void**` writable tidak memakai WinAPI per swap. Pembaca C++ yang concurrent harus ikut memakai atomic load.
+  - VFT menggunakan assignment langsung sesuai pola PolyHook; hentikan sementara pemanggilan virtual saat enable/disable. Slot read-only tetap membutuhkan `VirtualProtect`.
 
 ---
 

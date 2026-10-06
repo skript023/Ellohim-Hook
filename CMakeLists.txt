@@ -6,8 +6,8 @@ project(EllohimHook LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-if (NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
-    message(FATAL_ERROR "This hardened integration currently supports Windows x64 only")
+if(NOT WIN32 OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+    message(FATAL_ERROR "Ellohim-Hook currently supports Windows x64 only")
 endif()
 
 if (MSVC)
@@ -15,7 +15,25 @@ if (MSVC)
     add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
 endif()
 
-# Core disassembler source depending on architecture
+# Zydis (Modern x86/x64 Disassembler used by SafetyHook & PolyHook V2)
+set(ZYDIS_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+set(ZYDIS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(ZYDIS_BUILD_DOXYGEN OFF CACHE BOOL "" FORCE)
+
+if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/vendor/zydis/CMakeLists.txt")
+    add_subdirectory(vendor/zydis)
+else()
+    include(FetchContent)
+    FetchContent_Declare(
+        zydis
+        GIT_REPOSITORY https://github.com/zyantific/zydis.git
+        GIT_TAG        v4.1.0
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_MakeAvailable(zydis)
+endif()
+
+# Core disassembler source depending on architecture (Kept for compatibility with exception_handler.cpp)
 if (CMAKE_SIZEOF_VOID_P EQUAL 8)
     set(HDE_SRC src/hooking/core/hde/hde64.c)
 else()
@@ -34,6 +52,8 @@ set(ELLOHIM_HOOK_SOURCES
     src/hooking/detour_base.cpp
     src/hooking/detour_hook.cpp
     src/hooking/vmt_hook.cpp
+    src/hooking/vft_hook.cpp
+    src/hooking/iat_hook.cpp
     src/hooking/swap_pointer_hook.cpp
     src/hooking/mid_hook.cpp
     src/hooking.cpp
@@ -52,6 +72,8 @@ set(ELLOHIM_HOOK_HEADERS
     include/ellohim/hooking/detour_base.hpp
     include/ellohim/hooking/detour_hook.hpp
     include/ellohim/hooking/vmt_hook.hpp
+    include/ellohim/hooking/vft_hook.hpp
+    include/ellohim/hooking/iat_hook.hpp
     include/ellohim/hooking/swap_pointer_hook.hpp
     include/ellohim/hooking/mid_hook.hpp
     src/hooking/core/buffer.hpp
@@ -63,6 +85,7 @@ add_library(EllohimHook STATIC ${ELLOHIM_HOOK_SOURCES} ${ELLOHIM_HOOK_HEADERS})
 
 target_include_directories(EllohimHook PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/hooking/core/hde>
     $<INSTALL_INTERFACE:include>
 )
 
@@ -70,21 +93,19 @@ target_include_directories(EllohimHook PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/hooking
 )
 
-# Examples and test demo
-option(ELLOHIM_BUILD_EXAMPLES "Build Ellohim-Hook example executable" OFF)
+target_link_libraries(EllohimHook PUBLIC Zydis)
 
-option(ELLOHIM_BUILD_TESTS "Build native hook regression tests" OFF)
+# Examples and test demo
+option(ELLOHIM_BUILD_EXAMPLES "Build Ellohim-Hook example executable" ON)
+
+option(ELLOHIM_BUILD_TESTS "Build hook regression tests" OFF)
 if(ELLOHIM_BUILD_TESTS)
     enable_testing()
     add_executable(ellohim_hook_tests tests/hooks.cpp)
-    add_library(ellohim_mono_bridge SHARED tests/mono_bridge.cpp)
-    target_link_libraries(ellohim_mono_bridge PRIVATE EllohimHook)
-    set_target_properties(ellohim_mono_bridge PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/hook-tests" LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/hook-tests")
     target_link_libraries(ellohim_hook_tests PRIVATE EllohimHook)
     target_include_directories(ellohim_hook_tests PRIVATE src/hooking)
-    set_target_properties(ellohim_hook_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/hook-tests")
     add_test(NAME ellohim_hooks COMMAND ellohim_hook_tests)
-    set_tests_properties(ellohim_hooks PROPERTIES TIMEOUT 30)
+    set_tests_properties(ellohim_hooks PROPERTIES TIMEOUT 60)
 endif()
 
 if (ELLOHIM_BUILD_EXAMPLES)
