@@ -1,240 +1,151 @@
-# Ellohim-Hook
+# Ellohim-Hook 🎣
 
-Library hooking C++20 untuk Windows x64, dengan API bergaya `Mono Hacking` / `BigBase`, mesin detour internal, dan decoder Zydis. Lihat [kontrak lifecycle dan concurrency](INTEGRATION.md) sebelum integrasi.
+A modern, fast, and completely self-contained C++20 universal hooking library for Windows x64.
+Whether you're doing game modding, malware analysis, reverse engineering, or system instrumentation, Ellohim-Hook provides a robust, zero-dependency hooking engine powered internally by the [Zydis](https://github.com/zyantific/zydis) disassembler.
 
----
-
-## 🌟 Mengapa Ellohim-Hook Berbeda?
-
-- **Mesin detour internal**:
-  - **TIDAK memerlukan library eksternal** seperti MinHook, Detours, atau submodul lainnya.
-  - Memiliki mesin trampoline dan allocator dalam jangkauan relative branch; decoding instruksi menggunakan Zydis.
-  - CMake memakai `vendor/zydis` bila tersedia, atau mengambil Zydis v4.1.0 melalui FetchContent.
-
-- **Detour Hook (Native Inline / Trampoline Hook)**:
-  - Compile-time static template dispatch (`detour_hook::add<hooks::func>` & `detour_base::get_original<hooks::func>()`), menghasilkan **zero runtime map lookup overhead**.
-  - **Patching dengan thread suspension**: Membekukan thread yang terenumerasi dan memetakan instruction pointer sebelum menulis patch. Operasi lifecycle harus diserialisasi oleh caller.
-  - **Relocation**: Memasang patch pada entry yang diberikan, merelokasi instruksi dan cabang ke trampoline tanpa mengikuti jump chain menuju callback hook lain.
-  - **RIP-Relative Displacement Adjustment**: Secara otomatis merekalibrasi displacement instruksi 64-bit yang dipindahkan ke dalam buffer trampoline.
-  - **SEH Exception-Protected**: Membaca memori target dengan aman menggunakan Structured Exception Handling (`__try / __except`).
-
-- **VMT Hook (Virtual Method Table Swapping)**:
-  - Mengganti pointer vtable pada instance object (`*m_object = m_new_table`).
-  - **MSVC RTTI Preservation**: Menyalin pointer RTTI Complete Object Locator (`vtable[-1]`), sehingga `typeid` dan `dynamic_cast` tetap berfungsi normal tanpa crash.
-  - **Auto Method Count**: Secara otomatis mendeteksi jumlah virtual method menggunakan `VirtualQuery` jika tidak ditentukan secara manual.
-  - RAII-safe: Otomatis me-restore vtable asli saat destruktor dipanggil.
-
-- **Mid-Function Hook (`mid_hook`, Inspired by SafetyHook)**:
-  - Mengintersepsi eksekusi di tengah-tengah fungsi tanpa mengubah jalannya program.
-  - Menyimpan seluruh context register CPU (`mid_context`: RAX, RBX, RCX, RDX, RSI, RDI, RBP, R8-R15, RSP, RFLAGS, serta SIMD XMM0-XMM15).
-  - Melewatkan `mid_context&` ke callback `void(mid_context& ctx)`. GPR, flags, dan XMM dapat dimodifikasi; RSP/RIP hanya snapshot. Upper YMM/ZMM dan x87 tidak disimpan; callback tidak boleh melempar exception.
-  - Menjalankan kembali instruksi yang digantikan dan melanjutkan eksekusi ke fungsi asli secara transparan.
-
-- **Memory Utilities**:
-  - `memory::handle`: Wrapper pointer serbaguna (`as<T*>()`, `as<T&>()`, `as<uintptr_t>()`, `add()`, `sub()`, `rip()`).
-  - `memory::module`: Mengambil HMODULE, menghitung `SizeOfImage` dari PE Header, dan mencari export address dengan `get_export("Name")`.
-  - `memory::range` & `memory::pattern`: Scan memori dengan signature IDA (`"48 89 5C 24 ? 48 89 6C 24"`).
-
-- **Swap Pointer Hook**:
-  - Menyimpan original sekali dan mengganti slot secara atomik. Overload `std::atomic<void*>&` tidak memakai WinAPI; slot `void**` writable tidak memakai WinAPI per swap. Pembaca C++ yang concurrent harus ikut memakai atomic load.
-  - VFT menggunakan assignment langsung sesuai pola PolyHook; hentikan sementara pemanggilan virtual saat enable/disable. Slot read-only tetap membutuhkan `VirtualProtect`.
+Before diving in, be sure to check out our [Lifecycle and Concurrency Contract](INTEGRATION.md) for best practices on integration.
 
 ---
 
-## 🚀 Contoh Penggunaan
+## ✨ Features & How It Works
 
-### 1. Detour Hook (Sesuai Code Style yang Diminta)
+Ellohim-Hook is designed to be a universal toolkit. It doesn't rely on MinHook or Detours. Everything from the trampoline allocation to instruction relocation is built from scratch.
 
+- **Native Detour Engine**: The core inline hook. When enabled, it securely suspends running threads, replaces the first 5 bytes of a target function with a relative jump (`0xE9`), and safely relocates any stolen instructions (including RIP-relative ones) into a dynamically allocated trampoline buffer located within $\pm 2$ GB of the target memory.
+- **Zydis Powered Relocation**: To ensure 100% accurate instruction length decoding and displacement recalibration during detouring, Ellohim-Hook ships with Zydis v4.1.0 (included in `vendor/zydis` for instant offline building).
+- **Zero Runtime Overhead**: The callback architecture uses compile-time static template dispatch (`detour_hook::add<my_func>`), which entirely eliminates the need for slow runtime `std::map` lookups to find the original function pointer.
+- **Thread & Exception Safe**: Includes RAII thread freezing to prevent race conditions during patching, and uses Structured Exception Handling (`__try / __except`) when probing target memory.
+- **Universal Drop-In**: Comes with a clean, extensible C++20 API. (For developers coming from `BigBase` or `Mono Hacking`, it's also 100% drop-in compatible via `namespace big`).
+
+---
+
+## 🧰 The Hook Arsenal
+
+We’ve packed this library with every type of hook you'll ever need for game modding, instrumentation, or reverse engineering:
+
+- **Detour Hook (`detour_hook`)**: The classic 5-byte inline hook. Safe thread suspension, instruction relocation, and seamless trampoline execution.
+- **VMT Hook (`vmt_hook`)**: Virtual Method Table shadowing. Copies the table, preserves MSVC RTTI (`vtable[-1]`), and swaps the instance pointer. Super safe, zero memory protection changes needed.
+- **VFT Hook (`vft_hook`)**: PolyHook V2-style VFuncSwap. Patches the class's original virtual table slot in-place with `VirtualProtect`. Affects all instances of the class globally!
+- **IAT Hook (`iat_hook`)**: Import Address Table hooking. Give it a module and a DLL export name, and it'll parse the PE headers and swap the import pointer for you.
+- **Mid-Function Hook (`mid_hook`)**: Inspired by SafetyHook. Intercept execution at any instruction boundary! Captures the live 64-bit CPU context (RAX-R15, RFLAGS, XMM0-15, RSP, RIP) and lets you inspect or modify it before resuming seamlessly.
+- **Swap Pointer Hook (`swap_pointer_hook`)**: Atomic, thread-safe replacement for arbitrary pointers.
+
+Need memory utilities? We've got those too: `memory::module` (PE parser & exports), `memory::pattern` (IDA signature scanning), and `memory::handle` (pointer wrapper).
+
+---
+
+## 🚀 Quick Start Examples
+
+### 1. Detour Hook (The Classic)
 ```cpp
 #include <ellohim/ellohim.hpp>
-
-// Atau menggunakan namespace big (kompatibel penuh dengan BigBase/Mono Hacking):
-// using namespace big;
 using namespace ellohim;
 
-// Definisi hook callbacks
-struct hooks
-{
-    static BOOL set_cursor_pos(int x, int y)
-    {
-        // Custom logic di sini
+struct hooks {
+    static BOOL set_cursor_pos(int x, int y) {
         std::cout << "Intercepted SetCursorPos(" << x << ", " << y << ")\n";
-
-        // Panggil fungsi original dengan zero lookup overhead:
+        
+        // Call the original function with zero lookup overhead!
         return detour_base::get_original<hooks::set_cursor_pos>()(x, y);
     }
 };
 
-int main()
-{
-    // Tambahkan hook persis seperti style yang diinginkan:
+int main() {
+    // 1. Register the hook
     detour_hook::add<hooks::set_cursor_pos>(
         "SetCursorPos",
         memory::module("user32.dll").get_export("SetCursorPos").as<void*>()
     );
 
-    // Aktifkan semua hooks secara native (tanpa library luar)
+    // 2. Enable it
     detour_base::enable_all();
 
-    // Uji coba hook
-    SetCursorPos(500, 300);
-
-    // Nonaktifkan hook
+    SetCursorPos(500, 300); // Triggers our hook!
+    
     detour_base::disable_all();
-
     return 0;
 }
 ```
 
----
-
-### 2. VMT Hook (Virtual Method Table Swapping)
-
+### 2. VMT Hook (Table Shadowing)
 ```cpp
-#include <ellohim/ellohim.hpp>
-
-using namespace ellohim;
-
-class IGameRenderer
-{
+class IGameRenderer {
 public:
     virtual ~IGameRenderer() = default;
-    virtual void render_frame(int frame_id)
-    {
-        std::cout << "Original render_frame: " << frame_id << "\n";
-    }
+    virtual void render_frame(int frame_id) { /* ... */ }
 };
 
-namespace vmt_detours
-{
+namespace vmt_detours {
     static inline vmt_hook* g_vmt = nullptr;
-
-    void __fastcall hook_render_frame(IGameRenderer* this_ptr, int frame_id)
-    {
-        std::cout << "Hooked render_frame called! Frame: " << frame_id << "\n";
-
-        // Panggil original virtual function (index 1)
-        using fn_t = void(__fastcall*)(IGameRenderer*, int);
-        g_vmt->get_original<fn_t>(1)(this_ptr, frame_id);
+    void __fastcall hook_render_frame(IGameRenderer* this_ptr, int frame_id) {
+        std::cout << "Hooked render_frame!\n";
+        // Call original at index 1
+        g_vmt->get_original<void(__fastcall*)(IGameRenderer*, int)>(1)(this_ptr, frame_id);
     }
 }
 
-int main()
-{
-    auto renderer = std::make_unique<IGameRenderer>();
-
-    // Buat VMT hook (bisa tentukan jumlah method atau 0 untuk auto-detect)
-    vmt_hook vmt(renderer.get(), 2);
-    vmt_detours::g_vmt = &vmt;
-
-    // Pasang hook pada index ke-1
-    vmt.hook(1, reinterpret_cast<void*>(&vmt_detours::hook_render_frame));
-    vmt.enable();
-
-    // Panggil method virtual (akan masuk ke hook)
-    renderer->render_frame(42);
-
-    // Restore table asli
-    vmt.disable();
-
-    return 0;
-}
+// Inside your init function:
+vmt_hook vmt(renderer_instance, 2); // 2 virtual methods
+vmt_detours::g_vmt = &vmt;
+vmt.hook(1, reinterpret_cast<void*>(&vmt_detours::hook_render_frame));
+vmt.enable();
 ```
 
----
-
-### 3. Mid-Function Hook (Gaya SafetyHook)
-
+### 3. VFT Hook (In-Place VFuncSwap)
 ```cpp
-#include <ellohim/ellohim.hpp>
+int __fastcall hook_get_fps(IGameRenderer* this_ptr) {
+    return 144; // Spoof FPS globally for all instances!
+}
 
-using namespace ellohim;
+// Hook virtual table slot 2 directly:
+vft_hook::add<&hook_get_fps>("GetFpsVFT", renderer_instance, 2);
+vft_hook::enable_all();
+```
 
-// Callback MidHook menerima live context CPU:
-void on_my_mid_hook(mid_context& ctx)
-{
+### 4. Mid-Function Hook (Context Capture)
+```cpp
+void on_render_mid(mid_context& ctx) {
     std::cout << "Live register values:\n"
               << "RCX = " << ctx.rcx << "\n"
-              << "RDX = " << ctx.rdx << "\n"
               << "RSP = 0x" << std::hex << ctx.rsp << std::dec << "\n";
-
-    // Anda bahkan bisa memodifikasi register jika diperlukan:
-    // ctx.rax = 0x1337;
+              
+    // You can even modify registers on the fly!
+    // ctx.rax = 1337;
 }
 
-int main()
-{
-    void* target_address = /* alamat instruksi di dalam fungsi */;
+// Intercept execution anywhere in the function!
+mid_hook::add<on_render_mid>("RenderMid", target_address);
+mid_hook::enable_all();
+```
 
-    // Daftarkan mid_hook
-    mid_hook::add<on_my_mid_hook>("MyMidHook", target_address);
-    mid_hook::enable_all();
-
-    // Jalankan kode yang memanggil fungsi tersebut...
-
-    mid_hook::disable_all();
-    return 0;
+### 5. IAT Hook (Import Hooking)
+```cpp
+BOOL WINAPI hook_is_debugger_present() {
+    return TRUE; // Always trick the game into thinking a debugger is attached
 }
+
+iat_hook::add<&hook_is_debugger_present>(
+    "IsDebuggerPresentIAT",
+    GetModuleHandleW(nullptr), // The module to patch
+    "KERNEL32.dll",            // The DLL it imports from
+    "IsDebuggerPresent"        // The function name
+);
+iat_hook::enable_all();
 ```
 
 ---
 
-## 📁 Struktur Direktori
+## 🛠️ Building
 
-```text
-Ellohim-Hook/
-├── CMakeLists.txt           # Build script mandiri (murni MSVC/Clang + Windows SDK)
-├── README.md
-├── include/
-│   └── ellohim/
-│       ├── common.hpp       # Common headers & definitions
-│       ├── logger.hpp       # Logging system
-│       ├── ellohim.hpp      # Umbrella include
-│       ├── hooking.hpp      # Main hooking & compatibility layer (namespace big)
-│       ├── memory/
-│       │   ├── handle.hpp   # Pointer wrapper, type casting, RIP resolution
-│       │   ├── range.hpp    # Memory range operations
-│       │   ├── module.hpp   # Module loader, PE parser, export lookup
-│       │   └── pattern.hpp  # Signature pattern scanner
-│       └── hooking/
-│           ├── detour_base.hpp        # Base detour registry & static dispatch
-│           ├── detour_hook.hpp        # Detour hook dengan thunk resolution
-│           ├── vmt_hook.hpp           # VMT table swapping hook
-│           └── swap_pointer_hook.hpp  # Pointer & IAT swap hook
-├── src/
-│   ├── logger.cpp
-│   ├── hooking.cpp
-│   ├── memory/
-│   │   ├── range.cpp
-│   │   ├── module.cpp
-│   │   └── pattern.cpp
-│   └── hooking/
-│       ├── core/                      # Engine Detour Internal (Independent)
-│       │   ├── buffer.hpp/.cpp        # 2GB-range virtual memory slot allocator
-│       │   ├── trampoline.hpp/.cpp    # Trampoline generator & instruction relocator
-│       │   ├── thread_freezer.hpp     # Thread suspension helper untuk atomic patching
-│       │   └── hde/                   # Internal length disassembler (hde64 / hde32)
-│       ├── detour_base.cpp
-│       ├── detour_hook.cpp            # Native detour hook implementation
-│       ├── vmt_hook.cpp
-│       └── swap_pointer_hook.cpp
-└── examples/
-    └── main.cpp             # Contoh lengkap & pengujian semua hooks
-```
-
----
-
-## 🛠️ Build & Kompilasi
-
-Library ini hanya membutuhkan compiler yang mendukung **C++20** dan **Windows SDK**:
+Ellohim-Hook requires a compiler with **C++20** support and the **Windows SDK**. Zydis is pre-configured in `vendor/zydis`, so CMake will build right out of the box with zero internet connection required.
 
 ```bash
-# 1. Konfigurasi build (Visual Studio 2022 / 2026 x64)
+# 1. Configure the project
 cmake -B build -G "Visual Studio 18 2026" -A x64
 
-# 2. Build Release
+# 2. Build in Release mode
 cmake --build build --config Release
 
-# 3. Jalankan demo program
+# 3. Run the all-in-one demo tests!
 .\build\Release\EllohimHookExample.exe
 ```
