@@ -6,30 +6,23 @@ namespace ellohim
 	class vmt_hook
 	{
 	public:
-		explicit vmt_hook(void* obj, std::size_t num_funcs = 0);
+		explicit vmt_hook(const std::string_view name, void* obj, std::size_t num_funcs);
+		explicit vmt_hook(void* obj, std::size_t num_funcs);
 		~vmt_hook() noexcept;
 
-		vmt_hook(vmt_hook&& other) noexcept;
-		vmt_hook& operator=(vmt_hook&& other) noexcept;
-
-		vmt_hook(const vmt_hook&) = delete;
-		vmt_hook& operator=(const vmt_hook&) = delete;
+		vmt_hook(vmt_hook&& that) = delete;
+		vmt_hook& operator=(vmt_hook&& that) = delete;
+		vmt_hook(vmt_hook const&) = delete;
+		vmt_hook& operator=(vmt_hook const&) = delete;
 
 		void hook(std::size_t index, void* func);
 		void unhook(std::size_t index);
 
 		template<typename T>
-		[[nodiscard]] T get_original(std::size_t index) const
-		{
-			if (index >= num_funcs())
-				throw std::out_of_range("Vtable original index out of range");
-			if (!m_original_table)
-				return nullptr;
-			return reinterpret_cast<T>(m_original_table[index]);
-		}
+		T get_original(std::size_t index);
 
-		void enable();
-		void disable();
+		bool enable();
+		bool disable();
 
 		[[nodiscard]] bool is_enabled() const noexcept
 		{
@@ -43,12 +36,16 @@ namespace ellohim
 
 	private:
 		void*** m_object{nullptr};
-		std::size_t m_num_funcs{0}; // includes RTTI entry (num_funcs + 1)
+		std::size_t m_num_funcs{0};
 
 		void** m_original_table{nullptr};
 		std::unique_ptr<void*[]> m_new_table;
 		bool m_is_enabled{false};
-
-		static std::size_t count_virtual_functions(void** table);
 	};
+
+	template<typename T>
+	inline T vmt_hook::get_original(std::size_t index)
+	{
+		return reinterpret_cast<T>(m_original_table[index]);
+	}
 }
