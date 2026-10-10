@@ -79,7 +79,6 @@ namespace ellohim
 		bool patched = false;
 		DWORD error = ERROR_SUCCESS;
 		{
-			core::thread_freezer freezer;
 			DWORD protection{};
 			if (!bytes_equal(m_target, m_original_bytes, m_stolen_size))
 				error = ERROR_INVALID_DATA;
@@ -87,11 +86,14 @@ namespace ellohim
 				error = GetLastError();
 			else
 			{
-				if (freezer.relocate(m_info->hook, true))
 				{
-					std::memcpy(m_target, m_patch_bytes, m_patch_size);
-					if (!FlushInstructionCache(GetCurrentProcess(), m_target, m_patch_size)) std::terminate();
-					patched = true;
+					core::thread_freezer freezer;
+					if (freezer.relocate(m_info->hook, true))
+					{
+						std::memcpy(m_target, m_patch_bytes, m_patch_size);
+						if (!FlushInstructionCache(GetCurrentProcess(), m_target, m_patch_size)) std::terminate();
+						patched = true;
+					}
 				}
 				DWORD ignored{};
 				if (!VirtualProtect(m_target, m_patch_size, protection, &ignored)) std::terminate();
@@ -108,21 +110,24 @@ namespace ellohim
 			return true;
 		try
 		{
-			core::thread_freezer freezer;
 			if (!bytes_equal(m_target, m_patch_bytes, m_patch_size))
 				return false;
 			DWORD protection{};
-			if (!VirtualProtect(m_target, m_patch_size, PAGE_EXECUTE_READWRITE, &protection))
+			if (!VirtualProtect(m_target, m_stolen_size, PAGE_EXECUTE_READWRITE, &protection))
 				return false;
-			const bool safe = freezer.relocate(m_info->hook, false);
-			if (safe)
+			bool safe = false;
 			{
-				std::memcpy(m_target, m_original_bytes, m_patch_size);
-				if (!FlushInstructionCache(GetCurrentProcess(), m_target, m_patch_size)) std::terminate();
-				m_enabled = false;
+				core::thread_freezer freezer;
+				safe = freezer.relocate(m_info->hook, false);
+				if (safe)
+				{
+					std::memcpy(m_target, m_original_bytes, m_stolen_size);
+					if (!FlushInstructionCache(GetCurrentProcess(), m_target, m_stolen_size)) std::terminate();
+					m_enabled = false;
+				}
 			}
 			DWORD ignored{};
-			if (!VirtualProtect(m_target, m_patch_size, protection, &ignored)) std::terminate();
+			if (!VirtualProtect(m_target, m_stolen_size, protection, &ignored)) std::terminate();
 			return safe;
 		}
 		catch (...)
@@ -147,3 +152,5 @@ namespace ellohim
 	{
 	}
 }
+
+
