@@ -38,7 +38,9 @@ namespace ellohim::core
 					const auto thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, te.th32ThreadID);
 					if (!thread)
 					{
-						if (GetLastError() != ERROR_INVALID_PARAMETER)
+						const auto err = GetLastError();
+						// Ignore threads that cannot be accessed due to ACL/DRM restrictions or are already terminating
+						if (err != ERROR_INVALID_PARAMETER && err != ERROR_ACCESS_DENIED)
 							failed = true;
 						continue;
 					}
@@ -75,6 +77,9 @@ namespace ellohim::core
 				thread.context.ContextFlags = CONTEXT_CONTROL;
 				if (!GetThreadContext(thread.handle, &thread.context))
 				{
+					DWORD code{};
+					if (GetExitCodeThread(thread.handle, &code) && code != STILL_ACTIVE)
+						continue;
 					failed = true;
 					break;
 				}
